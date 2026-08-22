@@ -145,18 +145,9 @@ export function VoteBoard() {
     setJudges((prev) => prev.map((j, i) => (i === judgeIndex ? { ...j, ...patch } : j)))
   }
 
-  /** Clears votes AND photos/framing. Names, topic and sides are kept. */
+  /** Full reset back to defaults: topic, side names, judge names, photos and votes. */
   function resetAll() {
-    setJudges((prev) =>
-      prev.map((j) => ({
-        ...j,
-        photo: null,
-        zoom: 1,
-        ox: 0,
-        oy: 0,
-        votes: { impression: null, score: null, final: null },
-      })),
-    )
+    setState(makeDefault())
     setConfirmReset(false)
   }
 
