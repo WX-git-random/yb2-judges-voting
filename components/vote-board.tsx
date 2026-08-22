@@ -69,6 +69,7 @@ export function VoteBoard() {
   const [loaded, setLoaded] = useState(false)
   const [editMode, setEditMode] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [confirmReset, setConfirmReset] = useState(false)
   const fileInputs = useRef<Array<HTMLInputElement | null>>([])
 
   useEffect(() => {
@@ -107,6 +108,13 @@ export function VoteBoard() {
 
   const { topic, proName, conName, judges } = state
 
+  // Reset wipes photos, so require a second click to confirm.
+  useEffect(() => {
+    if (!confirmReset) return
+    const t = setTimeout(() => setConfirmReset(false), 3500)
+    return () => clearTimeout(t)
+  }, [confirmReset])
+
   function setJudges(updater: (prev: JudgeState[]) => JudgeState[]) {
     setState((s) => ({ ...s, judges: updater(s.judges) }))
   }
@@ -137,8 +145,19 @@ export function VoteBoard() {
     setJudges((prev) => prev.map((j, i) => (i === judgeIndex ? { ...j, ...patch } : j)))
   }
 
-  function resetVotes() {
-    setJudges((prev) => prev.map((j) => ({ ...j, votes: { impression: null, score: null, final: null } })))
+  /** Clears votes AND photos/framing. Names, topic and sides are kept. */
+  function resetAll() {
+    setJudges((prev) =>
+      prev.map((j) => ({
+        ...j,
+        photo: null,
+        zoom: 1,
+        ox: 0,
+        oy: 0,
+        votes: { impression: null, score: null, final: null },
+      })),
+    )
+    setConfirmReset(false)
   }
 
   async function copyUrl() {
@@ -170,11 +189,16 @@ export function VoteBoard() {
               {copied ? "已复制" : "复制链接"}
             </button>
             <button
-              onClick={resetVotes}
-              className="flex items-center gap-1.5 rounded-lg border border-white/20 bg-black/30 px-3 py-1.5 text-xs font-semibold text-white/85 transition hover:bg-white/15 active:scale-95"
+              onClick={() => (confirmReset ? resetAll() : setConfirmReset(true))}
+              className="flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition active:scale-95"
+              style={{
+                background: confirmReset ? "var(--color-con)" : "rgba(0,0,0,0.3)",
+                borderColor: confirmReset ? "var(--color-con)" : "rgba(255,255,255,0.2)",
+                color: confirmReset ? "#fff" : "rgba(255,255,255,0.85)",
+              }}
             >
               <RotateCcw className="size-3.5" />
-              重置
+              {confirmReset ? "确认清空？" : "重置"}
             </button>
             <button
               onClick={() => setEditMode((v) => !v)}
