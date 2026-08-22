@@ -513,8 +513,8 @@ function RowGroup({
   return (
     <>
       <div className={divider ? "border-t border-white/10 pt-4" : ""}>
-        <div className={big ? "text-2xl font-black text-white" : "text-sm font-black text-white"}>{label}</div>
-        <div className={big ? "text-sm font-medium text-white/40" : "text-[11px] font-medium text-white/40"}>{sub}</div>
+        <div className={big ? "text-2xl font-black text-white" : "text-xl font-black text-white"}>{label}</div>
+        <div className="text-sm font-medium text-white/40">{sub}</div>
       </div>
       {children}
     </>
