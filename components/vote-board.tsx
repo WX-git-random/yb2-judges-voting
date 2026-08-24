@@ -185,6 +185,10 @@ export function VoteBoard({ initialBoard }: { initialBoard: BoardState }) {
       return
     }
     setEditMode(false)
+    // Realtime was paused while editing — pull any votes cast meanwhile.
+    const supabase = createClient()
+    const { data } = await supabase.from("vote_board").select("*").eq("id", BOARD_ID).maybeSingle()
+    if (data) setState(normalizeBoard(data))
   }
 
   async function copyUrl() {
