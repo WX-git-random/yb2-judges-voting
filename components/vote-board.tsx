@@ -1,110 +1,78 @@
 "use client"
 
 import type React from "react"
-import { useEffect, useRef, useState } from "react"
-import { Trophy, RotateCcw, Camera, X, Pencil, Check, Link2, User, Minus, Plus } from "lucide-react"
+import { useCallback, useEffect, useRef, useState } from "react"
+import { Trophy, RotateCcw, Camera, X, Pencil, Check, Link2, User, Minus, Plus, Lock, Loader2 } from "lucide-react"
+import { createClient } from "@/lib/supabase/client"
+import {
+  BOARD_ID,
+  MIN_ZOOM,
+  MAX_ZOOM,
+  PHASES,
+  clampPos,
+  clampZoom,
+  judgeResult,
+  normalizeBoard,
+  type BoardState,
+  type JudgeState,
+  type Phase,
+  type Side,
+} from "@/lib/board-types"
+import {
+  adjustPhoto as adjustPhotoAction,
+  castVote as castVoteAction,
+  deletePhoto as deletePhotoAction,
+  resetBoard as resetBoardAction,
+  updateMeta as updateMetaAction,
+  uploadPhoto as uploadPhotoAction,
+  verifyPassword,
+} from "@/app/actions"
 
-type Side = "pro" | "con"
-type Phase = "impression" | "score" | "final"
-
-type JudgeState = {
-  name: string
-  photo: string | null
-  /** Photo framing: zoom factor plus translate offsets in percent (0 = centered). */
-  zoom: number
-  ox: number
-  oy: number
-  votes: Record<Phase, Side | null>
-}
-
-const MIN_ZOOM = 1
-const MAX_ZOOM = 3
-const PAN_LIMIT = 60
-
-/** Translate offsets are free on both axes so any photo can move up/down and left/right. */
-const clampPos = (v: number) => Math.min(PAN_LIMIT, Math.max(-PAN_LIMIT, Number(v.toFixed(2))))
-const clampZoom = (v: number) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Number(v.toFixed(3))))
-
-type BoardState = {
-  topic: string
-  proName: string
-  conName: string
-  judges: JudgeState[]
-}
-
-const PHASES: { key: Phase; label: string; sub: string }[] = [
-  { key: "impression", label: "印象票", sub: "第一轮" },
-  { key: "score", label: "分数票", sub: "第二轮" },
-  { key: "final", label: "决选票", sub: "第三轮" },
-]
-
-const STORAGE_KEY = "judge-vote-board-v2"
-
-function makeDefault(): BoardState {
-  return {
-    topic: "辩题：请在此输入本场辩题",
-    proName: "正方",
-    conName: "反方",
-    judges: Array.from({ length: 4 }, (_, i) => ({
-      name: `评审${["一", "二", "三", "四"][i]}`,
-      photo: null,
-      zoom: 1,
-      ox: 0,
-      oy: 0,
-      votes: { impression: null, score: null, final: null },
-    })),
-  }
-}
-
-/** Majority winner of a judge's three votes, only once all three are cast. */
-function judgeResult(votes: Record<Phase, Side | null>): Side | null {
-  const cast = [votes.impression, votes.score, votes.final]
-  if (cast.some((v) => v === null)) return null
-  const pro = cast.filter((v) => v === "pro").length
-  return pro >= 2 ? "pro" : "con"
-}
-
-export function VoteBoard() {
-  const [state, setState] = useState<BoardState>(makeDefault)
-  const [loaded, setLoaded] = useState(false)
+export function VoteBoard({ initialBoard }: { initialBoard: BoardState }) {
+  const [state, setState] = useState<BoardState>(initialBoard)
   const [editMode, setEditMode] = useState(false)
   const [copied, setCopied] = useState(false)
   const [confirmReset, setConfirmReset] = useState(false)
+  const [password, setPassword] = useState("")
+  const [askPassword, setAskPassword] = useState<null | "edit" | "reset">(null)
+  const [pwError, setPwError] = useState("")
+  const [busy, setBusy] = useState(false)
+  const [uploading, setUploading] = useState<number | null>(null)
   const fileInputs = useRef<Array<HTMLInputElement | null>>([])
 
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY)
-      if (raw) {
-        const parsed = JSON.parse(raw) as BoardState
-        if (parsed?.judges?.length === 4) {
-          // Older saves have no framing fields — fill them in.
-          setState({
-            ...parsed,
-            judges: parsed.judges.map((j) => ({
-              ...j,
-              zoom: typeof j.zoom === "number" ? j.zoom : 1,
-              // Old saves stored 0–100 object-position values; recenter them for translate-based panning.
-              ox: typeof j.ox === "number" ? clampPos(j.ox - 50) : 0,
-              oy: typeof j.oy === "number" ? clampPos(j.oy - 50) : 0,
-            })),
-          })
-        }
-      }
-    } catch {
-      // ignore corrupt storage
-    }
-    setLoaded(true)
-  }, [])
+  // Local edits must not be clobbered by realtime echoes of our own writes.
+  const editingRef = useRef(false)
+  editingRef.current = editMode
 
+  // Live-sync the shared board to every open device.
   useEffect(() => {
-    if (!loaded) return
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
-    } catch {
-      // storage may be full (large images) — fail silently
+    const supabase = createClient()
+
+    const channel = supabase
+      .channel("vote-board")
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "vote_board", filter: `id=eq.${BOARD_ID}` },
+        (payload) => {
+          if (editingRef.current) return
+          setState(normalizeBoard(payload.new as Record<string, unknown>))
+        },
+      )
+      .subscribe()
+
+    // Safety net: re-fetch when the tab regains focus in case a realtime frame was missed.
+    const onFocus = async () => {
+      if (editingRef.current) return
+      const { data } = await supabase.from("vote_board").select("*").eq("id", BOARD_ID).maybeSingle()
+      if (data) setState(normalizeBoard(data))
     }
-  }, [state, loaded])
+    window.addEventListener("focus", onFocus)
+
+    return () => {
+      window.removeEventListener("focus", onFocus)
+      supabase.removeChannel(channel)
+    }
+  }, [])
 
   const { topic, proName, conName, judges } = state
 
@@ -119,6 +87,7 @@ export function VoteBoard() {
     setState((s) => ({ ...s, judges: updater(s.judges) }))
   }
 
+  /** Optimistic: paint locally, then persist so all devices converge. */
   function castVote(judgeIndex: number, phase: Phase, side: Side) {
     if (editMode) return
     setJudges((prev) =>
@@ -128,27 +97,98 @@ export function VoteBoard() {
         return { ...j, votes: { ...j.votes, [phase]: current === side ? null : side } }
       }),
     )
+    void castVoteAction(judgeIndex, phase, side)
   }
 
-  function handlePhoto(judgeIndex: number, file: File) {
-    const reader = new FileReader()
-    reader.onload = () => {
-      const dataUrl = reader.result as string
-      setJudges((prev) =>
-        prev.map((j, i) => (i === judgeIndex ? { ...j, photo: dataUrl, zoom: 1, ox: 0, oy: 0 } : j)),
-      )
+  async function handlePhoto(judgeIndex: number, file: File) {
+    setUploading(judgeIndex)
+    const fd = new FormData()
+    fd.append("file", file)
+    const res = await uploadPhotoAction(judgeIndex, fd)
+    setUploading(null)
+    if (!res.ok) {
+      setPwError(res.error)
+      setTimeout(() => setPwError(""), 2500)
     }
-    reader.readAsDataURL(file)
+    // Realtime delivers the stored public URL to every device, including this one.
   }
 
-  function adjustPhoto(judgeIndex: number, patch: { zoom?: number; ox?: number; oy?: number }) {
+  const adjustPhoto = useCallback((judgeIndex: number, patch: { zoom?: number; ox?: number; oy?: number }) => {
     setJudges((prev) => prev.map((j, i) => (i === judgeIndex ? { ...j, ...patch } : j)))
+  }, [])
+
+  /** Framing is dragged continuously, so only persist once the gesture ends. */
+  const commitPhoto = useCallback((judgeIndex: number, patch: { zoom: number; ox: number; oy: number }) => {
+    void adjustPhotoAction(judgeIndex, patch)
+  }, [])
+
+  async function deletePhoto(judgeIndex: number) {
+    setJudges((prev) => prev.map((j, i) => (i === judgeIndex ? { ...j, photo: null, zoom: 1, ox: 0, oy: 0 } : j)))
+    void deletePhotoAction(judgeIndex)
   }
 
-  /** Full reset back to defaults: topic, side names, judge names, photos and votes. */
-  function resetAll() {
-    setState(makeDefault())
+  /** Password-gated actions ask once, then remember the password for this tab. */
+  async function requestAdmin(intent: "edit" | "reset") {
+    if (password) {
+      const ok = await verifyPassword(password)
+      if (ok.ok) return runAdmin(intent)
+      setPassword("")
+    }
+    setPwError("")
+    setAskPassword(intent)
+  }
+
+  async function runAdmin(intent: "edit" | "reset") {
+    if (intent === "edit") {
+      setEditMode(true)
+      return
+    }
+    setBusy(true)
+    const res = await resetBoardAction(password)
+    setBusy(false)
     setConfirmReset(false)
+    if (!res.ok) {
+      setPwError(res.error)
+      setTimeout(() => setPwError(""), 2500)
+    }
+  }
+
+  async function submitPassword(e: React.FormEvent) {
+    e.preventDefault()
+    const intent = askPassword
+    if (!intent) return
+    setBusy(true)
+    const res = await verifyPassword(password)
+    setBusy(false)
+    if (!res.ok) {
+      setPwError(res.error)
+      return
+    }
+    setAskPassword(null)
+    setPwError("")
+    await runAdmin(intent)
+  }
+
+  /** Saves edited text fields, then leaves edit mode. */
+  async function finishEditing() {
+    setBusy(true)
+    const res = await updateMetaAction(password, {
+      topic,
+      proName,
+      conName,
+      judgeNames: judges.map((j) => j.name),
+    })
+    setBusy(false)
+    if (!res.ok) {
+      setPwError(res.error)
+      setTimeout(() => setPwError(""), 2500)
+      return
+    }
+    setEditMode(false)
+    // Realtime was paused while editing — pull any votes cast meanwhile.
+    const supabase = createClient()
+    const { data } = await supabase.from("vote_board").select("*").eq("id", BOARD_ID).maybeSingle()
+    if (data) setState(normalizeBoard(data))
   }
 
   async function copyUrl() {
@@ -180,26 +220,28 @@ export function VoteBoard() {
               {copied ? "已复制" : "复制链接"}
             </button>
             <button
-              onClick={() => (confirmReset ? resetAll() : setConfirmReset(true))}
-              className="flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition active:scale-95"
+              onClick={() => (confirmReset ? requestAdmin("reset") : setConfirmReset(true))}
+              disabled={busy}
+              className="flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition active:scale-95 disabled:opacity-50"
               style={{
                 background: confirmReset ? "var(--color-con)" : "rgba(0,0,0,0.3)",
                 borderColor: confirmReset ? "var(--color-con)" : "rgba(255,255,255,0.2)",
                 color: confirmReset ? "#fff" : "rgba(255,255,255,0.85)",
               }}
             >
-              <RotateCcw className="size-3.5" />
+              {busy && confirmReset ? <Loader2 className="size-3.5 animate-spin" /> : <RotateCcw className="size-3.5" />}
               {confirmReset ? "确认清空？" : "重置"}
             </button>
             <button
-              onClick={() => setEditMode((v) => !v)}
-              className="flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition active:scale-95"
+              onClick={() => (editMode ? finishEditing() : requestAdmin("edit"))}
+              disabled={busy}
+              className="flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition active:scale-95 disabled:opacity-50"
               style={{
                 background: editMode ? "var(--color-pro)" : "rgba(0,0,0,0.3)",
                 borderColor: editMode ? "var(--color-pro)" : "rgba(255,255,255,0.2)",
               }}
             >
-              {editMode ? <Check className="size-3.5" /> : <Pencil className="size-3.5" />}
+              {editMode ? <Check className="size-3.5" /> : <Lock className="size-3.5" />}
               {editMode ? "完成" : "编辑"}
             </button>
           </div>
@@ -247,9 +289,11 @@ export function VoteBoard() {
               <div key={i} className="flex flex-col items-center gap-2">
                 <AvatarFrame
                   judge={judge}
+                  uploading={uploading === i}
                   onPick={() => fileInputs.current[i]?.click()}
                   onAdjust={(patch) => adjustPhoto(i, patch)}
-                  onDelete={() => setJudges((prev) => prev.map((j, k) => (k === i ? { ...j, photo: null } : j)))}
+                  onCommit={(patch) => commitPhoto(i, patch)}
+                  onDelete={() => deletePhoto(i)}
                 >
                   <input
                     ref={(el) => {
@@ -359,20 +403,83 @@ export function VoteBoard() {
           </div>
         </footer>
       </div>
+
+      {/* Password gate for 编辑 / 重置 — voting stays open to everyone */}
+      {askPassword && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
+          <form
+            onSubmit={submitPassword}
+            className="flex w-full max-w-sm flex-col gap-4 rounded-2xl border border-white/15 bg-[#1a0f2e] p-6 shadow-2xl"
+          >
+            <div className="flex items-center gap-2">
+              <Lock className="size-5 text-[var(--color-pro)]" />
+              <h2 className="text-lg font-bold text-white">
+                {askPassword === "reset" ? "重置需要密码" : "编辑需要密码"}
+              </h2>
+            </div>
+            <p className="text-sm text-white/55">投票无需密码；仅编辑与重置需要管理密码。</p>
+            <input
+              type="password"
+              autoFocus
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="输入管理密码"
+              className="rounded-lg border border-white/25 bg-black/40 px-3 py-2 text-white outline-none placeholder:text-white/35 focus:border-[var(--color-pro)]"
+            />
+            {pwError && <p className="text-sm font-semibold text-[var(--color-con)]">{pwError}</p>}
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setAskPassword(null)
+                  setPwError("")
+                  setConfirmReset(false)
+                }}
+                className="rounded-lg border border-white/20 px-4 py-2 text-sm font-semibold text-white/80 transition hover:bg-white/10"
+              >
+                取消
+              </button>
+              <button
+                type="submit"
+                disabled={busy || !password}
+                className="flex items-center gap-1.5 rounded-lg bg-[var(--color-pro)] px-4 py-2 text-sm font-bold text-white transition hover:opacity-90 disabled:opacity-50"
+              >
+                {busy && <Loader2 className="size-4 animate-spin" />}
+                确认
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Transient error toast for non-gated failures (upload, save) */}
+      {pwError && !askPassword && (
+        <div
+          role="status"
+          className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-lg px-4 py-2 text-sm font-bold text-white shadow-lg"
+          style={{ background: "var(--color-con)" }}
+        >
+          {pwError}
+        </div>
+      )}
     </div>
   )
 }
 
 function AvatarFrame({
   judge,
+  uploading,
   onPick,
   onAdjust,
+  onCommit,
   onDelete,
   children,
 }: {
   judge: JudgeState
+  uploading: boolean
   onPick: () => void
   onAdjust: (patch: { zoom?: number; ox?: number; oy?: number }) => void
+  onCommit: (patch: { zoom: number; ox: number; oy: number }) => void
   onDelete: () => void
   children: React.ReactNode
 }) {
@@ -381,17 +488,27 @@ function AvatarFrame({
   const drag = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null)
   const [dragging, setDragging] = useState(false)
 
+  // Latest framing, so debounced/deferred commits always send current values.
+  const latest = useRef({ zoom, ox, oy })
+  latest.current = { zoom, ox, oy }
+
   // Non-passive wheel listener so zooming doesn't scroll the page.
   useEffect(() => {
     const el = frameRef.current
     if (!el || !photo) return
+    let t: ReturnType<typeof setTimeout>
     const onWheel = (e: WheelEvent) => {
       e.preventDefault()
-      onAdjust({ zoom: clampZoom(zoom + (e.deltaY < 0 ? 0.08 : -0.08)) })
+      onAdjust({ zoom: clampZoom(latest.current.zoom + (e.deltaY < 0 ? 0.08 : -0.08)) })
+      clearTimeout(t)
+      t = setTimeout(() => onCommit(latest.current), 400)
     }
     el.addEventListener("wheel", onWheel, { passive: false })
-    return () => el.removeEventListener("wheel", onWheel)
-  }, [photo, zoom, onAdjust])
+    return () => {
+      clearTimeout(t)
+      el.removeEventListener("wheel", onWheel)
+    }
+  }, [photo, onAdjust, onCommit])
 
   function handlePointerDown(e: React.PointerEvent) {
     if (!photo) return
@@ -412,6 +529,7 @@ function AvatarFrame({
   }
 
   function endDrag() {
+    if (drag.current) onCommit(latest.current)
     drag.current = null
     setDragging(false)
   }
@@ -447,9 +565,15 @@ function AvatarFrame({
           </span>
         )}
 
-        {!photo && (
+        {!photo && !uploading && (
           <span className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/50 opacity-0 transition group-hover:opacity-100">
             <Camera className="size-6" />
+          </span>
+        )}
+
+        {uploading && (
+          <span className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/65">
+            <Loader2 className="size-10 animate-spin text-white/90" />
           </span>
         )}
       </div>
@@ -467,7 +591,10 @@ function AvatarFrame({
           {/* Framing controls — appear on hover so the stage view stays clean */}
           <div className="absolute inset-x-4 bottom-3 z-10 flex items-center gap-1.5 rounded-lg bg-black/85 px-2 py-1.5 opacity-0 backdrop-blur-sm transition group-hover:opacity-100">
             <button
-              onClick={() => onAdjust({ zoom: clampZoom(zoom - 0.12) })}
+              onClick={() => {
+                onAdjust({ zoom: clampZoom(zoom - 0.12) })
+                onCommit({ ...latest.current, zoom: clampZoom(zoom - 0.12) })
+              }}
               className="shrink-0 rounded p-0.5 text-white/80 transition hover:bg-white/15 active:scale-90"
               aria-label="缩小"
             >
@@ -480,18 +607,26 @@ function AvatarFrame({
               step={0.02}
               value={zoom}
               onChange={(e) => onAdjust({ zoom: clampZoom(Number(e.target.value)) })}
+              onPointerUp={() => onCommit(latest.current)}
+              onKeyUp={() => onCommit(latest.current)}
               className="h-1 min-w-0 flex-1 accent-[var(--color-pro)]"
               aria-label="缩放照片"
             />
             <button
-              onClick={() => onAdjust({ zoom: clampZoom(zoom + 0.12) })}
+              onClick={() => {
+                onAdjust({ zoom: clampZoom(zoom + 0.12) })
+                onCommit({ ...latest.current, zoom: clampZoom(zoom + 0.12) })
+              }}
               className="shrink-0 rounded p-0.5 text-white/80 transition hover:bg-white/15 active:scale-90"
               aria-label="放大"
             >
               <Plus className="size-3.5" />
             </button>
             <button
-              onClick={() => onAdjust({ zoom: 1, ox: 0, oy: 0 })}
+              onClick={() => {
+                onAdjust({ zoom: 1, ox: 0, oy: 0 })
+                onCommit({ zoom: 1, ox: 0, oy: 0 })
+              }}
               className="shrink-0 rounded p-0.5 text-white/80 transition hover:bg-white/15 active:scale-90"
               aria-label="复位"
             >
