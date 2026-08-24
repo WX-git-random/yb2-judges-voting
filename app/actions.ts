@@ -82,11 +82,13 @@ export async function castVote(judgeIndex: number, phase: Phase, side: Side): Pr
   return saveJudges(judges)
 }
 
-/** Photo framing (zoom/pan) is treated like voting — no password needed. */
+/** Password-gated: photo framing (zoom/pan) is an edit-mode action. */
 export async function adjustPhoto(
+  password: string,
   judgeIndex: number,
   patch: { zoom?: number; ox?: number; oy?: number },
 ): Promise<Result> {
+  if (!checkPassword(password)) return { ok: false, error: "密码错误" }
   if (!Number.isInteger(judgeIndex) || judgeIndex < 0 || judgeIndex >= JUDGE_COUNT) {
     return { ok: false, error: "无效的评审" }
   }
@@ -104,8 +106,9 @@ export async function adjustPhoto(
   return saveJudges(judges)
 }
 
-/** Uploads to public storage so every device loads the same URL. */
-export async function uploadPhoto(judgeIndex: number, formData: FormData): Promise<Result> {
+/** Password-gated. Uploads to public storage so every device loads the same URL. */
+export async function uploadPhoto(password: string, judgeIndex: number, formData: FormData): Promise<Result> {
+  if (!checkPassword(password)) return { ok: false, error: "密码错误" }
   if (!Number.isInteger(judgeIndex) || judgeIndex < 0 || judgeIndex >= JUDGE_COUNT) {
     return { ok: false, error: "无效的评审" }
   }
@@ -134,7 +137,9 @@ export async function uploadPhoto(judgeIndex: number, formData: FormData): Promi
   return saveJudges(judges)
 }
 
-export async function deletePhoto(judgeIndex: number): Promise<Result> {
+/** Password-gated: removing a photo is an edit-mode action. */
+export async function deletePhoto(password: string, judgeIndex: number): Promise<Result> {
+  if (!checkPassword(password)) return { ok: false, error: "密码错误" }
   if (!Number.isInteger(judgeIndex) || judgeIndex < 0 || judgeIndex >= JUDGE_COUNT) {
     return { ok: false, error: "无效的评审" }
   }

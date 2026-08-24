@@ -40,6 +40,9 @@ export function VoteBoard({ initialBoard }: { initialBoard: BoardState }) {
   const [uploading, setUploading] = useState<number | null>(null)
   const fileInputs = useRef<Array<HTMLInputElement | null>>([])
 
+  // Held only for the duration of one edit session, then wiped.
+  const passwordRef = useRef("")
+
   // Local edits must not be clobbered by realtime echoes of our own writes.
   const editingRef = useRef(false)
   editingRef.current = editMode
@@ -101,16 +104,21 @@ export function VoteBoard({ initialBoard }: { initialBoard: BoardState }) {
   }
 
   async function handlePhoto(judgeIndex: number, file: File) {
+    if (!editMode) return
     setUploading(judgeIndex)
     const fd = new FormData()
     fd.append("file", file)
-    const res = await uploadPhotoAction(judgeIndex, fd)
+    const res = await uploadPhotoAction(passwordRef.current, judgeIndex, fd)
     setUploading(null)
     if (!res.ok) {
       setPwError(res.error)
       setTimeout(() => setPwError(""), 2500)
+      return
     }
-    // Realtime delivers the stored public URL to every device, including this one.
+    // Edit mode pauses realtime, so pull the stored public URL for this device.
+    const supabase = createClient()
+    const { data } = await supabase.from("vote_board").select("*").eq("id", BOARD_ID).maybeSingle()
+    if (data) setState(normalizeBoard(data))
   }
 
   const adjustPhoto = useCallback((judgeIndex: number, patch: { zoom?: number; ox?: number; oy?: number }) => {
@@ -119,21 +127,18 @@ export function VoteBoard({ initialBoard }: { initialBoard: BoardState }) {
 
   /** Framing is dragged continuously, so only persist once the gesture ends. */
   const commitPhoto = useCallback((judgeIndex: number, patch: { zoom: number; ox: number; oy: number }) => {
-    void adjustPhotoAction(judgeIndex, patch)
+    void adjustPhotoAction(passwordRef.current, judgeIndex, patch)
   }, [])
 
   async function deletePhoto(judgeIndex: number) {
+    if (!editMode) return
     setJudges((prev) => prev.map((j, i) => (i === judgeIndex ? { ...j, photo: null, zoom: 1, ox: 0, oy: 0 } : j)))
-    void deletePhotoAction(judgeIndex)
+    void deletePhotoAction(passwordRef.current, judgeIndex)
   }
 
-  /** Password-gated actions ask once, then remember the password for this tab. */
-  async function requestAdmin(intent: "edit" | "reset") {
-    if (password) {
-      const ok = await verifyPassword(password)
-      if (ok.ok) return runAdmin(intent)
-      setPassword("")
-    }
+  /** Always prompt: the password is never remembered between sessions. */
+  function requestAdmin(intent: "edit" | "reset") {
+    setPassword("")
     setPwError("")
     setAskPassword(intent)
   }
@@ -144,9 +149,10 @@ export function VoteBoard({ initialBoard }: { initialBoard: BoardState }) {
       return
     }
     setBusy(true)
-    const res = await resetBoardAction(password)
+    const res = await resetBoardAction(passwordRef.current)
     setBusy(false)
     setConfirmReset(false)
+    passwordRef.current = ""
     if (!res.ok) {
       setPwError(res.error)
       setTimeout(() => setPwError(""), 2500)
@@ -164,15 +170,18 @@ export function VoteBoard({ initialBoard }: { initialBoard: BoardState }) {
       setPwError(res.error)
       return
     }
+    // Keep it only in the ref so edit-mode writes can authenticate.
+    passwordRef.current = password
+    setPassword("")
     setAskPassword(null)
     setPwError("")
     await runAdmin(intent)
   }
 
-  /** Saves edited text fields, then leaves edit mode. */
+  /** Saves edited text fields, then leaves edit mode and forgets the password. */
   async function finishEditing() {
     setBusy(true)
-    const res = await updateMetaAction(password, {
+    const res = await updateMetaAction(passwordRef.current, {
       topic,
       proName,
       conName,
@@ -185,6 +194,7 @@ export function VoteBoard({ initialBoard }: { initialBoard: BoardState }) {
       return
     }
     setEditMode(false)
+    passwordRef.current = ""
     // Realtime was paused while editing — pull any votes cast meanwhile.
     const supabase = createClient()
     const { data } = await supabase.from("vote_board").select("*").eq("id", BOARD_ID).maybeSingle()
@@ -289,6 +299,7 @@ export function VoteBoard({ initialBoard }: { initialBoard: BoardState }) {
               <div key={i} className="flex flex-col items-center gap-2">
                 <AvatarFrame
                   judge={judge}
+                  editable={editMode}
                   uploading={uploading === i}
                   onPick={() => fileInputs.current[i]?.click()}
                   onAdjust={(patch) => adjustPhoto(i, patch)}
@@ -468,6 +479,7 @@ export function VoteBoard({ initialBoard }: { initialBoard: BoardState }) {
 
 function AvatarFrame({
   judge,
+  editable,
   uploading,
   onPick,
   onAdjust,
@@ -476,6 +488,7 @@ function AvatarFrame({
   children,
 }: {
   judge: JudgeState
+  editable: boolean
   uploading: boolean
   onPick: () => void
   onAdjust: (patch: { zoom?: number; ox?: number; oy?: number }) => void
@@ -495,7 +508,7 @@ function AvatarFrame({
   // Non-passive wheel listener so zooming doesn't scroll the page.
   useEffect(() => {
     const el = frameRef.current
-    if (!el || !photo) return
+    if (!el || !photo || !editable) return
     let t: ReturnType<typeof setTimeout>
     const onWheel = (e: WheelEvent) => {
       e.preventDefault()
@@ -508,10 +521,10 @@ function AvatarFrame({
       clearTimeout(t)
       el.removeEventListener("wheel", onWheel)
     }
-  }, [photo, onAdjust, onCommit])
+  }, [photo, editable, onAdjust, onCommit])
 
   function handlePointerDown(e: React.PointerEvent) {
-    if (!photo) return
+    if (!photo || !editable) return
     frameRef.current?.setPointerCapture(e.pointerId)
     drag.current = { x: e.clientX, y: e.clientY, ox, oy }
     setDragging(true)
@@ -543,12 +556,14 @@ function AvatarFrame({
         onPointerUp={endDrag}
         onPointerCancel={endDrag}
         onClick={() => {
-          if (!photo) onPick()
+          if (editable && !photo) onPick()
         }}
-        className="relative size-40 overflow-hidden rounded-full border-2 border-white/20 bg-white/5 transition hover:border-white/50 sm:size-[250px]"
-        style={{ cursor: photo ? (dragging ? "grabbing" : "grab") : "pointer" }}
-        role={photo ? undefined : "button"}
-        aria-label={photo ? `拖动调整${name}的照片` : `上传${name}的照片`}
+        className={`relative size-40 overflow-hidden rounded-full border-2 bg-white/5 transition sm:size-[250px] ${
+          editable ? "border-white/20 hover:border-white/50" : "border-white/20"
+        }`}
+        style={{ cursor: editable ? (photo ? (dragging ? "grabbing" : "grab") : "pointer") : "default" }}
+        role={editable && !photo ? "button" : undefined}
+        aria-label={editable ? (photo ? `拖动调整${name}的照片` : `上传${name}的照片`) : name}
       >
         {photo ? (
           // eslint-disable-next-line @next/next/no-img-element
@@ -565,7 +580,7 @@ function AvatarFrame({
           </span>
         )}
 
-        {!photo && !uploading && (
+        {editable && !photo && !uploading && (
           <span className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/50 opacity-0 transition group-hover:opacity-100">
             <Camera className="size-6" />
           </span>
@@ -578,7 +593,7 @@ function AvatarFrame({
         )}
       </div>
 
-      {photo && (
+      {editable && photo && (
         <>
           <button
             onClick={onDelete}
