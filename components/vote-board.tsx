@@ -275,7 +275,7 @@ export function VoteBoard({ initialBoard }: { initialBoard: BoardState }) {
                 className="mt-2 w-full rounded-md border border-white/25 bg-black/40 px-2.5 py-1.5 text-center text-xl font-medium outline-none focus:border-white/60"
               />
             ) : (
-              <p className="mt-2 text-xl font-medium text-balance text-white/70">{topic}</p>
+              <p className="mt-2 text-2xl font-medium text-balance text-white/70">{topic}</p>
             )}
           </div>
         </header>
@@ -316,7 +316,7 @@ export function VoteBoard({ initialBoard }: { initialBoard: BoardState }) {
                     className="w-full rounded-md border border-white/25 bg-black/40 px-1 py-1 text-center text-base font-bold outline-none focus:border-white/60"
                   />
                 ) : (
-                  <span className="max-w-full truncate text-center text-lg font-bold">{judge.name}</span>
+                  <span className="max-w-full truncate text-center text-3xl font-bold">{judge.name}</span>
                 )}
               </div>
             ))}
@@ -663,8 +663,8 @@ function RowGroup({
   return (
     <>
       <div className={divider ? "border-t border-white/10 pt-4" : ""}>
-        <div className={big ? "text-2xl font-black text-white" : "text-xl font-black text-white"}>{label}</div>
-        <div className="text-sm font-medium text-white/40">{sub}</div>
+        <div className={big ? "text-2xl font-black text-white" : "text-2xl font-black text-white"}>{label}</div>
+        <div className="text-base font-medium text-white/40">{sub}</div>
       </div>
       {children}
     </>
